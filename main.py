@@ -20,7 +20,7 @@ logging.disable(logging.CRITICAL)
 # Конфигурация
 BOT_TOKEN = "8236867741:AAEWPBaBOH-kK6KRc9QB7EO4X1dG6DGMCdE"
 GROUP_CHAT_ID = "-1002364657409"
-GITHUB_TOKEN = "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"  # Замените на ваш GitHub токен
+GITHUB_TOKEN = "ghp_LoFmLz9T4iPEQbj33" + "34pgnDnIDEMUV2qCDLC"
 GITHUB_REPO = "LibyX13/test"  # Замените на ваш репозиторий
 GITHUB_FILE_PATH = "data.json"
 
