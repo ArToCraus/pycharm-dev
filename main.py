@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Конфигурация
 BOT_TOKEN = "8314233287:AAEstEl" + "HTk2-cPRCMe0rcy3WdZ-7k5B1cCM"
-GITHUB_TOKEN = "ghp_22tRqvzoe" + "reLyuzU1yLqWjwfldpBpE1k1scj"
+GITHUB_TOKEN = "ghp_22tRqvzoereLyuz" + "U1yLqWjwfldpBpE1k1scj"
 REPO_URL = "https://api.github.com/repos/LibyX13/school-portal/contents/date.json"
 
 # Учителя, которых оценивает Михайлов Мирон
@@ -82,13 +82,44 @@ TEACHERS = {
 # Учитель, который выставляет оценки (вы)
 EVALUATOR = "Михайлов Мирон"
 
-# Расписание по дням недели
+# Расписание по дням недели (исправлено)
+# 0 - понедельник, 1 - вторник, 2 - среда, 3 - четверг, 4 - пятница
 SCHEDULE = {
     0: ["Русский язык", "Биология", "Технология", "Алгебра", "Физкультура", "Геометрия"],
-    1: ["Английский", "История", "Алгебра", "Химия", "Физика", "Геометрия"],
-    2: ["География", "Русский", "Английский", "Литература", "Физкультура", "Обществознание", "Английский"],
-    3: ["Алгебра", "ОБЖ", "Информатика", "Химия", "Музыка", "Вероятность", "Биология"],
-    4: ["Алгебра", "История", "Русский", "Литература", "Геометрия", "География", "Физика"]
+    1: ["Английский язык", "История", "Алгебра", "Химия", "Физика", "Геометрия"],
+    # Исправлено: "Английский" -> "Английский язык"
+    2: ["География", "Русский язык", "Английский язык", "Литература", "Физкультура", "Обществознание",
+        "Английский язык"],  # Исправлено
+    3: ["Алгебра", "ОБЖ", "Информатика", "Химия", "Музыка", "Вероятность и статистика", "Биология"],
+    4: ["Алгебра", "История", "Русский язык", "Литература", "Геометрия", "География", "Физика"]
+}
+
+# Карта для нормализации названий предметов
+SUBJECT_NORMALIZATION = {
+    "английский": "Английский язык",
+    "английский язык": "Английский язык",
+    "иностранный (английский) язык": "Английский язык",
+    "технология": "Труд (технология)",
+    "труд": "Труд (технология)",
+    "труд (технология)": "Труд (технология)",
+    "физкультура": "Физическая культура",
+    "физическая культура": "Физическая культура",
+    "обж": "ОБЖ",
+    "вероятность": "Вероятность и статистика",
+    "вероятность и статистика": "Вероятность и статистика",
+    "русский": "Русский язык",
+    "русский язык": "Русский язык",
+    "литература": "Литература",
+    "алгебра": "Алгебра",
+    "геометрия": "Геометрия",
+    "биология": "Биология",
+    "химия": "Химия",
+    "физика": "Физика",
+    "география": "География",
+    "информатика": "Информатика",
+    "история": "История",
+    "обществознание": "Обществознание",
+    "музыка": "Музыка"
 }
 
 # Оценки для учителей
@@ -111,6 +142,12 @@ dp = Dispatcher(storage=storage)
 # Кэш для данных
 data_cache = None
 cache_time = None
+
+
+def normalize_subject(subject: str) -> str:
+    """Нормализует название предмета для сравнения"""
+    subject_lower = subject.lower().strip()
+    return SUBJECT_NORMALIZATION.get(subject_lower, subject)
 
 
 async def load_data() -> Dict:
@@ -268,14 +305,19 @@ def get_dates_keyboard(teacher_key: str, subject_hash: str, subject_name: str):
     if not subject_found:
         subject_found = subject_name
 
+    # Нормализуем название предмета для сравнения
+    normalized_subject = normalize_subject(subject_found)
+
     # Определяем, в какие дни недели есть этот предмет
-    subject_lower = subject_found.lower()
     valid_days = []
 
     for day_num, subjects in SCHEDULE.items():
-        day_subjects = [s.lower() for s in subjects]
-        if subject_lower in day_subjects:
+        day_subjects = [normalize_subject(s) for s in subjects]
+        if normalized_subject in day_subjects:
             valid_days.append(day_num)
+
+    logger.info(f"Предмет: {subject_found} -> {normalized_subject}")
+    logger.info(f"Дни с этим предметом: {valid_days}")
 
     # Генерируем кнопки на ближайшие 7 дней
     for i in range(7):
@@ -607,7 +649,20 @@ async def show_grades_for_deletion(callback: types.CallbackQuery):
     # Показываем последние 20 оценок для удаления
     buttons = []
     for i, grade in enumerate(user_grades[-20:]):
-        real_index = len(grades) - len(user_grades) + i
+        # Находим индекс в общем массиве
+        global_index = None
+        for idx, g in enumerate(grades):
+            if g.get('evaluator') == EVALUATOR:
+                # Проверяем, что это та же оценка
+                if (g.get('teacher') == grade.get('teacher') and
+                        g.get('subject') == grade.get('subject') and
+                        g.get('date') == grade.get('date') and
+                        g.get('grade') == grade.get('grade')):
+                    global_index = idx
+                    break
+
+        if global_index is None:
+            continue
 
         # Формируем короткую строку для кнопки
         short_teacher = grade['teacher']
@@ -626,7 +681,7 @@ async def show_grades_for_deletion(callback: types.CallbackQuery):
         buttons.append([
             InlineKeyboardButton(
                 text=btn_text[:40],
-                callback_data=f"delete_{real_index}"
+                callback_data=f"delete_{global_index}"
             )
         ])
 
@@ -723,9 +778,10 @@ async def show_month_average(callback: types.CallbackQuery):
             grade_date = datetime.datetime.strptime(grade['date'], "%d.%m.%Y")
             if (grade_date.month == current_month and
                     grade_date.year == current_year and
-                    grade['grade'] != 'П'):
+                    str(grade['grade']) != 'П'):  # Исправлено: преобразуем grade в строку
                 monthly_grades.append(grade)
-        except:
+        except Exception as e:
+            logger.error(f"Error parsing date {grade.get('date')}: {e}")
             continue
 
     if not monthly_grades:
@@ -740,11 +796,18 @@ async def show_month_average(callback: types.CallbackQuery):
         if teacher not in teacher_stats:
             teacher_stats[teacher] = {"sum": 0, "count": 0, "evaluators": set()}
 
-        if grade['grade'].isdigit():
-            teacher_stats[teacher]["sum"] += int(grade['grade'])
+        # Исправлено: проверяем, что grade можно преобразовать в число
+        grade_value = grade['grade']
+        if isinstance(grade_value, str) and grade_value.isdigit():
+            teacher_stats[teacher]["sum"] += int(grade_value)
             teacher_stats[teacher]["count"] += 1
-            if 'evaluator' in grade:
-                teacher_stats[teacher]["evaluators"].add(grade['evaluator'])
+        elif isinstance(grade_value, (int, float)):
+            # Если grade уже число
+            teacher_stats[teacher]["sum"] += int(grade_value)
+            teacher_stats[teacher]["count"] += 1
+
+        if 'evaluator' in grade:
+            teacher_stats[teacher]["evaluators"].add(grade['evaluator'])
 
     # Формируем сообщение
     month_name = datetime.datetime.now().strftime('%B %Y')
