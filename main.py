@@ -127,7 +127,8 @@ class GradeStates(StatesGroup):
     selecting_subject = State()
     selecting_date = State()
     selecting_grade = State()
-    entering_custom_date = State()  # Новое состояние для ввода даты вручную
+    entering_custom_date = State()
+    entering_custom_subject = State()  # Новое состояние для ввода предмета вручную
 
 # Инициализация бота
 bot = Bot(token=BOT_TOKEN)
@@ -214,6 +215,7 @@ def get_subject_hash(subject_name: str) -> str:
     """Получает хэш для предмета"""
     return hashlib.md5(subject_name.encode()).hexdigest()[:8]
 
+# Клавиатуры
 def get_main_keyboard():
     """Основная клавиатура"""
     buttons = [
@@ -264,6 +266,13 @@ def get_subjects_keyboard(teacher_key: str):
                 text=subject,
                 callback_data=f"subject_{teacher_key}_{sub_hash}"
             )])
+    # Кнопка для ввода предмета вручную
+    buttons.append([
+        InlineKeyboardButton(
+            text="➕ Ввести предмет вручную",
+            callback_data=f"enter_custom_subject_{teacher_key}"
+        )
+    ])
     buttons.append([InlineKeyboardButton(text="↩️ Назад к учителям", callback_data="back_to_teachers")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -376,6 +385,59 @@ async def process_select_teacher(callback: types.CallbackQuery, state: FSMContex
         )
     await callback.answer()
 
+# Обработка кнопки "Ввести предмет вручную"
+@dp.callback_query(GradeStates.selecting_subject, F.data.startswith("enter_custom_subject_"))
+async def process_enter_custom_subject(callback: types.CallbackQuery, state: FSMContext):
+    teacher_key = callback.data.replace("enter_custom_subject_", "")
+    teacher = TEACHERS.get(teacher_key)
+    
+    if teacher:
+        await state.update_data(teacher_key=teacher_key, teacher_name=teacher["full_name"])
+        await state.set_state(GradeStates.entering_custom_subject)
+        await callback.message.edit_text(
+            f"Учитель: {teacher['full_name']}\n\n"
+            f"Введите название предмета:\n"
+            f"Например: Математика, Черчение, Астрономия\n\n"
+            f"Или нажмите /cancel для отмены."
+        )
+    await callback.answer()
+
+# Обработка ввода предмета вручную
+@dp.message(GradeStates.entering_custom_subject)
+async def process_custom_subject_input(message: types.Message, state: FSMContext):
+    if message.text == "/cancel":
+        data = await state.get_data()
+        teacher_key = data.get('teacher_key')
+        await state.set_state(GradeStates.selecting_subject)
+        teacher = TEACHERS.get(teacher_key)
+        if teacher:
+            await message.answer(
+                f"Учитель: {teacher['full_name']}\nВыберите предмет для оценки:",
+                reply_markup=get_subjects_keyboard(teacher_key)
+            )
+        return
+    
+    custom_subject = message.text.strip()
+    if not custom_subject:
+        await message.answer("❌ Название предмета не может быть пустым. Введите предмет:")
+        return
+    
+    # Создаем хэш для пользовательского предмета
+    subject_hash = get_subject_hash(custom_subject)
+    
+    await state.update_data(
+        subject_hash=subject_hash,
+        subject_name=custom_subject,
+        is_custom_subject=True  # Флаг что предмет введен вручную
+    )
+    
+    await state.set_state(GradeStates.selecting_date)
+    await message.answer(
+        f"✅ Предмет установлен: {custom_subject}\n\n"
+        f"Выберите дату проведения урока:",
+        reply_markup=get_dates_keyboard("custom", subject_hash, custom_subject)
+    )
+
 @dp.callback_query(GradeStates.selecting_subject, F.data.startswith("subject_"))
 async def process_select_subject(callback: types.CallbackQuery, state: FSMContext):
     data_parts = callback.data.replace("subject_", "").split("_", 1)
@@ -393,14 +455,12 @@ async def process_select_subject(callback: types.CallbackQuery, state: FSMContex
             if get_subject_hash(subj) == subject_hash:
                 subject_name = subj
                 break
-        else:
-            if teacher["subjects"]:
-                subject_name = teacher["subjects"][0]
     
     await state.update_data(
         teacher_key=teacher_key,
         subject_hash=subject_hash,
-        subject_name=subject_name
+        subject_name=subject_name,
+        is_custom_subject=False  # Предмет из списка
     )
     await state.set_state(GradeStates.selecting_date)
     await callback.message.edit_text(
@@ -442,7 +502,6 @@ async def process_select_date(callback: types.CallbackQuery, state: FSMContext):
     )
     await callback.answer()
 
-# Обработка кнопки "Ввести дату вручную"
 @dp.callback_query(GradeStates.selecting_date, F.data == "enter_custom_date")
 async def process_enter_custom_date(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(GradeStates.entering_custom_date)
@@ -453,15 +512,14 @@ async def process_enter_custom_date(callback: types.CallbackQuery, state: FSMCon
     )
     await callback.answer()
 
-# Обработка ввода даты вручную
 @dp.message(GradeStates.entering_custom_date)
 async def process_custom_date_input(message: types.Message, state: FSMContext):
     if message.text == "/cancel":
-        await state.set_state(GradeStates.selecting_date)
         data = await state.get_data()
-        teacher_key = data.get('teacher_key')
+        teacher_key = data.get('teacher_key', 'custom')
         subject_hash = data.get('subject_hash')
-        subject_name = data.get('subject_name')
+        subject_name = data.get('subject_name', 'Неизвестный предмет')
+        await state.set_state(GradeStates.selecting_date)
         await message.answer(
             f"Предмет: {subject_name}\nВыберите дату проведения урока:",
             reply_markup=get_dates_keyboard(teacher_key, subject_hash, subject_name)
@@ -470,12 +528,10 @@ async def process_custom_date_input(message: types.Message, state: FSMContext):
     
     date_text = message.text.strip()
     
-    # Проверяем формат даты
     try:
         date_obj = datetime.datetime.strptime(date_text, "%d.%m.%Y")
         date_str = date_obj.strftime("%d.%m.%Y")
         
-        # Проверяем, что дата не в будущем (можно выставлять оценки только за прошедшие уроки)
         today = datetime.datetime.now().date()
         if date_obj.date() > today:
             await message.answer(
@@ -576,17 +632,288 @@ async def process_back_to_subjects(callback: types.CallbackQuery, state: FSMCont
         )
     await callback.answer()
 
-# Остальные функции (show_all_grades, show_grades_for_deletion, show_month_average)
-# остаются такими же как в предыдущем коде, добавьте их из вашего предыдущего кода
+# Функции для просмотра и удаления оценок
+async def show_all_grades(callback: types.CallbackQuery):
+    """Показывает все оценки"""
+    data = await load_data()
+    grades = data.get("grades", [])
+    
+    if not grades:
+        await callback.message.edit_text("📭 Оценок пока нет.", reply_markup=get_main_keyboard())
+        return
+    
+    # Фильтруем только оценки, выставленные текущим пользователем
+    user_grades = [g for g in grades if g.get('evaluator') == EVALUATOR]
+    
+    if not user_grades:
+        await callback.message.edit_text("📭 Вы ещё не выставляли оценок.", reply_markup=get_main_keyboard())
+        return
+    
+    # Группируем оценки по учителям
+    teacher_grades = {}
+    for grade in user_grades:
+        teacher = grade['teacher']
+        if teacher not in teacher_grades:
+            teacher_grades[teacher] = []
+        teacher_grades[teacher].append(grade)
+    
+    # Формируем сообщение
+    message_text = f"📋 Все оценки, выставленные {EVALUATOR}:\n\n"
+    
+    for teacher, grade_list in teacher_grades.items():
+        display_teacher = teacher[:35] + "..." if len(teacher) > 35 else teacher
+        message_text += f"👨‍🏫 {display_teacher}:\n"
+        
+        # Группируем по предметам
+        subject_grades = {}
+        for grade in grade_list:
+            subject = grade['subject']
+            if subject not in subject_grades:
+                subject_grades[subject] = []
+            subject_grades[subject].append(grade)
+        
+        for subject, sub_grades in subject_grades.items():
+            display_subject = subject[:30] + "..." if len(subject) > 30 else subject
+            message_text += f"  📚 {display_subject}:\n"
+            for g in sub_grades:
+                message_text += f"    • {g['date']}: {g['grade']}\n"
+        message_text += "\n"
+    
+    buttons = [[InlineKeyboardButton(text="↩️ Назад в меню", callback_data="back_to_main")]]
+    
+    if len(message_text) > 4000:
+        parts = [message_text[i:i+4000] for i in range(0, len(message_text), 4000)]
+        for i, part in enumerate(parts):
+            if i == len(parts) - 1:
+                await callback.message.answer(part, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+            else:
+                await callback.message.answer(part)
+    else:
+        await callback.message.edit_text(message_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    
+    await callback.answer()
+
+async def show_grades_for_deletion(callback: types.CallbackQuery):
+    """Показывает оценки для удаления"""
+    data = await load_data()
+    grades = data.get("grades", [])
+    
+    # Фильтруем только оценки текущего пользователя
+    user_grades = [g for g in grades if g.get('evaluator') == EVALUATOR]
+    
+    if not user_grades:
+        await callback.message.edit_text("📭 У вас нет оценок для удаления.", reply_markup=get_main_keyboard())
+        return
+    
+    # Показываем последние 20 оценок для удаления
+    buttons = []
+    for i, grade in enumerate(user_grades[-20:]):
+        # Находим индекс в общем массиве
+        global_index = None
+        for idx, g in enumerate(grades):
+            if g.get('evaluator') == EVALUATOR:
+                if (g.get('teacher') == grade.get('teacher') and 
+                    g.get('subject') == grade.get('subject') and 
+                    g.get('date') == grade.get('date') and 
+                    g.get('grade') == grade.get('grade')):
+                    global_index = idx
+                    break
+        
+        if global_index is None:
+            continue
+            
+        # Формируем короткую строку для кнопки
+        short_teacher = grade['teacher']
+        if len(short_teacher) > 20:
+            parts = short_teacher.split()
+            if len(parts) >= 2:
+                short_teacher = f"{parts[0]} {parts[1][0]}."
+            else:
+                short_teacher = short_teacher[:17] + "..."
+        
+        short_subject = grade['subject']
+        if len(short_subject) > 15:
+            short_subject = short_subject[:12] + "..."
+        
+        btn_text = f"{grade['date']} - {short_teacher} - {grade['grade']}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=btn_text[:40],
+                callback_data=f"delete_{global_index}"
+            )
+        ])
+    
+    buttons.append([InlineKeyboardButton(text="↩️ Назад в меню", callback_data="back_to_main")])
+    
+    await callback.message.edit_text(
+        f"Выберите оценку для удаления (ваши последние 20 оценок):",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def process_confirm_delete(callback: types.CallbackQuery):
+    """Подтверждение удаления оценки"""
+    try:
+        index = int(callback.data.replace("delete_", ""))
+    except ValueError:
+        await callback.answer("Ошибка индекса", show_alert=True)
+        return
+    
+    data = await load_data()
+    grades = data.get("grades", [])
+    
+    if 0 <= index < len(grades):
+        grade = grades[index]
+        
+        # Проверяем, что это оценка текущего пользователя
+        if grade.get('evaluator') != EVALUATOR:
+            await callback.answer("Вы можете удалять только свои оценки", show_alert=True)
+            return
+        
+        buttons = [
+            [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{index}")],
+            [InlineKeyboardButton(text="❌ Нет, отмена", callback_data="delete_grade")]
+        ]
+        
+        await callback.message.edit_text(
+            f"Вы уверены, что хотите удалить оценку?\n\n"
+            f"Учитель: {grade['teacher']}\n"
+            f"Предмет: {grade['subject']}\n"
+            f"Дата: {grade['date']}\n"
+            f"Оценка: {grade['grade']}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons)
+        )
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def process_final_delete(callback: types.CallbackQuery):
+    """Финальное удаление оценки"""
+    try:
+        index = int(callback.data.replace("confirm_delete_", ""))
+    except ValueError:
+        await callback.answer("Ошибка индекса", show_alert=True)
+        return
+    
+    data = await load_data()
+    grades = data.get("grades", [])
+    
+    if 0 <= index < len(grades):
+        deleted_grade = grades.pop(index)
+        data["grades"] = grades
+        
+        if await save_data(data):
+            await callback.message.edit_text(
+                f"✅ Оценка удалена!\n\n"
+                f"Учитель: {deleted_grade['teacher']}\n"
+                f"Оценка: {deleted_grade['grade']}"
+            )
+        else:
+            await callback.message.edit_text("❌ Ошибка при удалении.")
+    
+    await callback.answer()
+
+async def show_month_average(callback: types.CallbackQuery):
+    """Показывает средний балл за месяц"""
+    data = await load_data()
+    grades = data.get("grades", [])
+    
+    if not grades:
+        await callback.message.edit_text("📭 Оценок за месяц нет.", reply_markup=get_main_keyboard())
+        return
+    
+    # Фильтруем оценки за текущий месяц (кроме пропусков)
+    current_month = datetime.datetime.now().month
+    current_year = datetime.datetime.now().year
+    
+    monthly_grades = []
+    for grade in grades:
+        try:
+            grade_date = datetime.datetime.strptime(grade['date'], "%d.%m.%Y")
+            if (grade_date.month == current_month and 
+                grade_date.year == current_year and
+                str(grade['grade']) != 'П'):
+                monthly_grades.append(grade)
+except Exception as e:
+            logger.error(f"Error parsing date {grade.get('date')}: {e}")
+            continue
+    
+    if not monthly_grades:
+        await callback.message.edit_text("📭 Оценок за текущий месяц нет.", reply_markup=get_main_keyboard())
+        return
+    
+    # Группируем по учителям и считаем средний балл
+    teacher_stats = {}
+    
+    for grade in monthly_grades:
+        teacher = grade['teacher']
+        if teacher not in teacher_stats:
+            teacher_stats[teacher] = {"sum": 0, "count": 0, "evaluators": set()}
+        
+        # Исправлено: проверяем, что grade можно преобразовать в число
+        grade_value = grade['grade']
+        if isinstance(grade_value, str) and grade_value.isdigit():
+            teacher_stats[teacher]["sum"] += int(grade_value)
+            teacher_stats[teacher]["count"] += 1
+        elif isinstance(grade_value, (int, float)):
+            # Если grade уже число
+            teacher_stats[teacher]["sum"] += int(grade_value)
+            teacher_stats[teacher]["count"] += 1
+        
+        if 'evaluator' in grade:
+            teacher_stats[teacher]["evaluators"].add(grade['evaluator'])
+    
+    # Формируем сообщение
+    month_name = datetime.datetime.now().strftime('%B %Y')
+    message_text = f"📊 Средние баллы учителей за {month_name}:\n\n"
+    
+    for teacher, stats in teacher_stats.items():
+        if stats["count"] > 0:
+            average = stats["sum"] / stats["count"]
+            display_teacher = teacher[:30] + "..." if len(teacher) > 30 else teacher
+            
+            message_text += f"👨‍🏫 {display_teacher}:\n"
+            message_text += f"  Средний балл: {average:.2f}\n"
+            message_text += f"  Количество оценок: {stats['count']}\n"
+            if stats["evaluators"]:
+                evaluators_list = ", ".join(stats["evaluators"])
+                if len(evaluators_list) > 30:
+                    evaluators_list = evaluators_list[:27] + "..."
+                message_text += f"  Оценивали: {evaluators_list}\n"
+            message_text += "\n"
+    
+    buttons = [[InlineKeyboardButton(text="↩️ Назад в меню", callback_data="back_to_main")]]
+    await callback.message.edit_text(message_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+    await callback.answer()
 
 # Обработчик для необработанных callback_data
 @dp.callback_query()
 async def handle_unknown_callback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработчик для неизвестных callback_data"""
     logger.warning(f"Unhandled callback data: {callback.data}")
+    
+    # Если callback_data начинается с "no_dates", обрабатываем отдельно
+    if callback.data == "no_dates":
+        await callback.answer("Нет доступных дат для этого предмета", show_alert=True)
+        # Возвращаем к выбору предмета
+        data = await state.get_data()
+        teacher_key = data.get('teacher_key')
+        if teacher_key:
+            teacher = TEACHERS.get(teacher_key)
+            if teacher:
+                await state.set_state(GradeStates.selecting_subject)
+                await callback.message.edit_text(
+                    f"Учитель: {teacher['full_name']}\nВыберите другой предмет:",
+                    reply_markup=get_subjects_keyboard(teacher_key)
+                )
+        return
+    
     await callback.answer("Команда не распознана. Возвращаю в меню...", show_alert=True)
     await state.clear()
     await callback.message.edit_text("Главное меню:", reply_markup=get_main_keyboard())
 
+# Основная функция
 async def main():
     print(f"✅ Бот запущен для {EVALUATOR}...")
     await dp.start_polling(bot)
