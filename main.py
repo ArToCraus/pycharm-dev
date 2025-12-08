@@ -822,8 +822,8 @@ async def handle_unknown_callback(callback: types.CallbackQuery, state: FSMConte
         teacher_key = data.get('teacher_key')
         if teacher_key:
             teacher = TEACHERS.get(teacher_key)
-            if teacher
-await state.set_state(GradeStates.selecting_subject)
+            if teacher:
+                await state.set_state(GradeStates.selecting_subject)
                 await callback.message.edit_text(
                     f"Учитель: {teacher['full_name']}\nВыберите другой предмет:",
                     reply_markup=get_subjects_keyboard(teacher_key)
